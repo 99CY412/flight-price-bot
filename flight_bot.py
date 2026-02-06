@@ -12,59 +12,73 @@ def send_msg(text):
     payload = {'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'}
     requests.post(url, data=payload)
 
-# Setup round-trip search
-flight_data = [
-    FlightData(date="2026-03-20", from_airport="HKG", to_airport="TPE"),
-    FlightData(date="2026-03-22", from_airport="TPE", to_airport="HKG")
-]
+def get_one_way_flights(from_airport, to_airport, date, time_start, time_end):
+    flight_data = FlightData(date=date, from_airport=from_airport, to_airport=to_airport)
+    try:
+        result = get_flights(
+            flight_data=[flight_data],
+            trip="one-way",
+            seat="economy",
+            passengers=Passengers(adults=1),
+            fetch_mode="fallback"
+        )
+        matching_flights = []
+        if result and result.flights:
+            for flight in result.flights:
+                dep_time = flight.departure if hasattr(flight, 'departure') else ""
+                name = flight.name if hasattr(flight, 'name') else ""
+                price = flight.price if hasattr(flight, 'price') else "未知"
+                # 匹配時間範圍 (e.g. "09:" for 9:xx, "19:" for 19:xx)
+                if time_start in dep_time or time_end in dep_time:
+                    if "HX" in name:  # 只限香港航空
+                        flight_num = name.split()[1] if len(name.split()) > 1 else "未知"  # 假設 name 如 "HX 252"
+                        matching_flights.append({
+                            "num": flight_num,
+                            "time": dep_time,
+                            "price": price,
+                            "name": name
+                        })
+        return matching_flights
+    except Exception as e:
+        return []
 
-hx_total = "暫無數據"
-hx_details = "無匹配 HX252/HX261"
-uo_total = "暫無數據"
-uo_details = "無匹配 UO110/UO115"
+# 去程：2026-03-20 HKG→TPE 上午9:05–10:50 (filter "09:" or "10:")
+go_flights = get_one_way_flights("HKG", "TPE", "2026-03-20", "09:", "10:")
+hx_go_details = "無匹配 9:05–10:50 HX 航班"
+hx_go_price = "無數據"
+if go_flights:
+    # 取第一個匹配的 (或最平的)
+    best_go = go_flights[0]
+    hx_go_details = f"{best_go['num']} (去程): {best_go['time']} HKG → TPE, 價格 {best_go['price']}"
+    hx_go_price = best_go['price']
 
-try:
-    result: Result = get_flights(
-        flight_data=flight_data,
-        trip="round-trip",
-        seat="economy",
-        passengers=Passengers(adults=1),
-        fetch_mode="fallback"  # 推薦用 fallback 模式
-    )
+# 回程：2026-03-22 TPE→HKG 晚上7:20–9:25 (filter "19:" or "20:" or "21:")
+ret_flights = get_one_way_flights("TPE", "HKG", "2026-03-22", "19:", "21:")
+hx_ret_details = "無匹配 19:20–21:25 HX 航班"
+hx_ret_price = "無數據"
+if ret_flights:
+    best_ret = ret_flights[0]
+    hx_ret_details = f"{best_ret['num']} (回程): {best_ret['time']} TPE → HKG, 價格 {best_ret['price']}"
+    hx_ret_price = best_ret['price']
 
-    if result and result.flights:
-        # 迭代所有 flights (每個是 round-trip 行程)
-        for flight in result.flights:
-            price_str = flight.price if hasattr(flight, 'price') else "未知"
-            # flight.name 可能如 "Hong Kong Airlines HX252 · 2h 45m" 或類似
-            name = flight.name if hasattr(flight, 'name') else ""
-            departure_time = flight.departure if hasattr(flight, 'departure') else "未知"
-            arrival_time = flight.arrival if hasattr(flight, 'arrival') else "未知"
-
-            # 簡單 parse name 找 flight number (e.g. "HX252", "UO110")
-            if "HX252" in name and "HX261" in name:  # 假設 name 包含兩個 flight number
-                hx_total = price_str
-                hx_details = f"- HX252 (去程): {departure_time} HKG → ... TPE\n- HX261 (回程): ... TPE → {arrival_time} HKG"
-            elif "UO110" in name and "UO115" in name:
-                uo_total = price_str
-                uo_details = f"- UO110 (去程): {departure_time} HKG → ... TPE\n- UO115 (回程): ... TPE → {arrival_time} HKG"
-            else:
-                # fallback: 找 HX 或 UO 相關 name 的最平價
-                if "HX" in name and (hx_total == "暫無數據" or price_str < hx_total):
-                    hx_total = price_str
-                    hx_details = "最平 HX nonstop 選項（可能非指定航班）"
-                if "UO" in name and (uo_total == "暫無數據" or price_str < uo_total):
-                    uo_total = price_str
-                    uo_details = "最平 UO nonstop 選項（可能非指定航班）"
-
-except Exception as e:
-    hx_details = uo_details = f"查詢失敗: {str(e)}"
+# 計算總價
+hx_total = "無法計算"
+if hx_go_price != "無數據" and hx_ret_price != "無數據":
+    try:
+        go_num = float(hx_go_price.replace("HKD ", "").replace(",", "").strip())
+        ret_num = float(hx_ret_price.replace("HKD ", "").replace(",", "").strip())
+        total = go_num + ret_num
+        hx_total = f"HKD {total:.0f}"
+    except:
+        hx_total = "計算錯誤 (價格格式異常)"
 
 msg = f"<b>今日更新 ({datetime.now().strftime('%Y-%m-%d %H:%M')} HKT)</b>\nHKG ↔ TPE 來回 2026-03-20 出發 / 03-22 返程\n經濟艙 單人來回總價\n\n"
 
-msg += "<b>香港航空 (超值飛)：</b>\n" + hx_details + "\n- 單人來回總價: " + hx_total + "\n\n"
-msg += "<b>香港快運 (隨心飛)：</b>\n" + uo_details + "\n- 單人來回總價: " + uo_total + "\n\n"
+msg += "<b>香港航空 (超值飛)：</b>\n"
+msg += f"- {hx_go_details}\n"
+msg += f"- {hx_ret_details}\n"
+msg += f"- 單人來回總價: {hx_total}\n\n"
 
-msg += "數據來自 Google Flights scrape (fast-flights)，實際以官網為準。時間為預定，可能有變。"
+msg += "數據來自 Google Flights scrape (fast-flights)，以指定時間範圍搜尋香港航空航班。實際以官網為準。如果無價格，可能 fares 未 release。"
 
 send_msg(msg)
