@@ -1,5 +1,4 @@
 import requests
-import json
 import os
 from datetime import datetime
 
@@ -8,110 +7,91 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 API_KEY = os.getenv('SERPAPI_KEY')
 CHAT_ID = os.getenv('CHAT_ID')
 
-HISTORY_FILE = 'prices.json'
-
 def send_msg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'}
     requests.post(url, data=payload)
 
-def load_prev():
-    try:
-        with open(HISTORY_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {'hx': None, 'uo': None}
-
-def save(hx, uo):
-    with open(HISTORY_FILE, 'w') as f:
-        json.dump({'hx': hx, 'uo': uo}, f)
-
-def get_prices():
+def get_one_way_price(departure_id, arrival_id, date, airline_code, flight_num, flight_label):
     url = "https://serpapi.com/search.json"
     params = {
         "engine": "google_flights",
-        "departure_id": "HKG",
-        "arrival_id": "TPE",
-        "outbound_date": "2026-03-20",
-        "return_date": "2026-03-22",
+        "departure_id": departure_id,
+        "arrival_id": arrival_id,
+        "outbound_date": date,
         "adults": 1,
         "currency": "HKD",
         "hl": "zh-Hant",
         "gl": "hk",
-        "include_airlines": "HX,UO",
+        "include_airlines": airline_code,
+        "type": "2",  # one-way
         "api_key": API_KEY
     }
     r = requests.get(url, params=params)
     if r.status_code != 200:
-        return None, None, None, None
+        return None, None
 
     data = r.json()
-    hx_price = hx_times = uo_price = uo_times = None
+    price = None
+    time_str = None
 
     for g in data.get('best_flights', []) + data.get('other_flights', []):
-        if 'flights' not in g or len(g['flights']) != 2: continue
-        out = g['flights'][0]
-        ret = g['flights'][1]
-        out_num = out.get('flight_number', '')
-        ret_num = ret.get('flight_number', '')
+        if 'flights' not in g or len(g['flights']) != 1: continue
+        flight = g['flights'][0]
+        num = flight.get('flight_number', '')
+        if flight_num in num:
+            price = g.get('price')
+            time_str = f"{flight_label} (去程/回程): {flight['departure_airport']['time']} {departure_id} → {flight['arrival_airport']['time']} {arrival_id}"
+            break
 
-        if '252' in out_num and '261' in ret_num:
-            hx_price = g.get('price')
-            hx_times = f"{out['departure_airport']['time']} HKG → {out['arrival_airport']['time']} TPE"
-            hx_times = f"HX252 (去程): {hx_times}\nHX261 (回程): {ret['departure_airport']['time']} TPE → {ret['arrival_airport']['time']} HKG"
-        elif '110' in out_num and '115' in ret_num:
-            uo_price = g.get('price')
-            uo_times = f"{out['departure_airport']['time']} HKG → {out['arrival_airport']['time']} TPE"
-            uo_times = f"UO110 (去程): {uo_times}\nUO115 (回程): {ret['departure_airport']['time']} TPE → {ret['arrival_airport']['time']} HKG"
+    return price, time_str
 
-    return hx_price, hx_times, uo_price, uo_times
+# HX 查詢
+hx_go_price, hx_go_time = get_one_way_price("HKG", "TPE", "2026-03-20", "HX", "252", "HX252")
+hx_ret_price, hx_ret_time = get_one_way_price("TPE", "HKG", "2026-03-22", "HX", "261", "HX261")
 
-hx_p, hx_t, uo_p, uo_t = get_prices()
-prev = load_prev()
+hx_total = None
+if hx_go_price and hx_ret_price:
+    try:
+        go_num = float(hx_go_price.replace('HKD', '').replace(',', '').strip())
+        ret_num = float(hx_ret_price.replace('HKD', '').replace(',', '').strip())
+        hx_total = f"HKD {go_num + ret_num:.0f}"
+    except:
+        hx_total = "計算失敗"
 
-# 預設時間（如果 API 無返）
-hx_default = "HX252 (去程): 09:05 HKG → 10:50 TPE\nHX261 (回程): 19:20 TPE → 21:25 HKG"
-uo_default = "UO110 (去程): 11:25 HKG → 13:10 TPE\nUO115 (回程): 17:40 TPE → 19:40 HKG"
+# UO 查詢（同樣邏輯）
+uo_go_price, uo_go_time = get_one_way_price("HKG", "TPE", "2026-03-20", "UO", "110", "UO110")
+uo_ret_price, uo_ret_time = get_one_way_price("TPE", "HKG", "2026-03-22", "UO", "115", "UO115")
+
+uo_total = None
+if uo_go_price and uo_ret_price:
+    try:
+        go_num = float(uo_go_price.replace('HKD', '').replace(',', '').strip())
+        ret_num = float(uo_ret_price.replace('HKD', '').replace(',', '').strip())
+        uo_total = f"HKD {go_num + ret_num:.0f}"
+    except:
+        uo_total = "計算失敗"
 
 msg = f"<b>今日更新 ({datetime.now().strftime('%Y-%m-%d %H:%M')} HKT)</b>\nHKG ↔ TPE 來回 2026-03-20 出發 / 03-22 返程\n經濟艙 單人來回總價\n\n"
 
-# 香港航空
+# 香港航空部分
 msg += "<b>香港航空 (超值飛)：</b>\n"
-msg += f"- {hx_t or hx_default}\n"
-if hx_p:
-    hx_price_num = float(hx_p.replace('HKD', '').replace(',', '').strip())
-    change_str = ""
-    if prev['hx']:
-        prev_num = float(prev['hx'].replace('HKD', '').replace(',', '').strip())
-        diff = hx_price_num - prev_num
-        pct = (diff / prev_num) * 100 if prev_num else 0
-        change_str = f" (變化 {'+' if diff>0 else ''}{diff:.0f} / {pct:+.1f}%)"
-        if diff < -200 or pct < -10:
-            change_str += "，可能有優惠！"
-    msg += f"- 單人來回總價: {hx_p}{change_str}\n\n"
+msg += f"- {hx_go_time or 'HX252 (去程): 時間未知或無數據'}\n"
+msg += f"- {hx_ret_time or 'HX261 (回程): 時間未知或無數據'}\n"
+if hx_total:
+    msg += f"- 單人來回總價: {hx_total}\n\n"
 else:
-    msg += "- 暫無匹配數據\n\n"
+    msg += "- 暫無 HX252 + HX261 價格數據（可能 fares 未完全 release）\n\n"
 
-# 香港快運
+# 香港快運部分
 msg += "<b>香港快運 (隨心飛)：</b>\n"
-msg += f"- {uo_t or uo_default}\n"
-if uo_p:
-    uo_price_num = float(uo_p.replace('HKD', '').replace(',', '').strip())
-    change_str = ""
-    if prev['uo']:
-        prev_num = float(prev['uo'].replace('HKD', '').replace(',', '').strip())
-        diff = uo_price_num - prev_num
-        pct = (diff / prev_num) * 100 if prev_num else 0
-        change_str = f" (變化 {'+' if diff>0 else ''}{diff:.0f} / {pct:+.1f}%)"
-        if diff < -200 or pct < -10:
-            change_str += "，可能有優惠！"
-    msg += f"- 單人來回總價: {uo_p}{change_str}\n\n"
+msg += f"- {uo_go_time or 'UO110 (去程): 時間未知或無數據'}\n"
+msg += f"- {uo_ret_time or 'UO115 (回程): 時間未知或無數據'}\n"
+if uo_total:
+    msg += f"- 單人來回總價: {uo_total}\n\n"
 else:
-    msg += "- 暫無匹配數據\n\n"
+    msg += "- 暫無 UO110 + UO115 價格數據（可能 fares 未完全 release）\n\n"
 
-msg += "價格來自 Google Flights，實際以官網為準。時間為預定，可能有變。"
+msg += "價格來自 Google Flights 單程查詢加總，實際以官網為準。時間為預定，可能有變。"
 
 send_msg(msg)
-
-# 保存當前價格（用於下次比較）
-save(hx_p, uo_p)
