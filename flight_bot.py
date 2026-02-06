@@ -1,7 +1,7 @@
 import os
 import requests
 from datetime import datetime
-from fast_flights import FlightData, Passengers, get_flights, Result
+from playwright.sync_api import sync_playwright
 
 # Secrets
 TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -12,73 +12,33 @@ def send_msg(text):
     payload = {'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'}
     requests.post(url, data=payload)
 
-def get_one_way_flights(from_airport, to_airport, date, time_start, time_end):
-    flight_data = FlightData(date=date, from_airport=from_airport, to_airport=to_airport)
-    try:
-        result = get_flights(
-            flight_data=[flight_data],
-            trip="one-way",
-            seat="economy",
-            passengers=Passengers(adults=1),
-            fetch_mode="fallback"
-        )
-        matching_flights = []
-        if result and result.flights:
-            for flight in result.flights:
-                dep_time = flight.departure if hasattr(flight, 'departure') else ""
-                name = flight.name if hasattr(flight, 'name') else ""
-                price = flight.price if hasattr(flight, 'price') else "未知"
-                # 匹配時間範圍 (e.g. "09:" for 9:xx, "19:" for 19:xx)
-                if time_start in dep_time or time_end in dep_time:
-                    if "HX" in name:  # 只限香港航空
-                        flight_num = name.split()[1] if len(name.split()) > 1 else "未知"  # 假設 name 如 "HX 252"
-                        matching_flights.append({
-                            "num": flight_num,
-                            "time": dep_time,
-                            "price": price,
-                            "name": name
-                        })
-        return matching_flights
-    except Exception as e:
-        return []
+url = "https://www.google.com/travel/flights/booking?tfs=CBwQAhpHEgoyMDI2LTAzLTIwIh8KA0hLRxIKMjAyNi0wMy0yMBoDVFBFKgJIWDIDMjUyMgJVTzICSFhqBwgBEgNIS0dyBwgBEgNUUEUaRxIKMjAyNi0wMy0yMiIfCgNUUEUSCjIwMjYtMDMtMjIaA0hLRyoCSFgyAzI2MTICVU8yAkhYagcIARIDVFBFcgcIARIDSEtHQAFIAXABggELCP___________wGYAQE&tfu=CmxDalJJUlUxc1EzQkdOakU1WW1kQlFuSmlhWGRDUnkwdExTMHRMUzB0TFMxMGJITnVNVUZCUVVGQlIyMUdOMkpWUjJwWlZsRkJFZ1ZJV0RJMk1Sb0tDT0FMRUFBYUEwaExSRGdjY0xHV0FRPT0SAggAIgA&hl=zh-TW&gl=hk&curr=HKD"
 
-# 去程：2026-03-20 HKG→TPE 上午9:05–10:50 (filter "09:" or "10:")
-go_flights = get_one_way_flights("HKG", "TPE", "2026-03-20", "09:", "10:")
-hx_go_details = "無匹配 9:05–10:50 HX 航班"
-hx_go_price = "無數據"
-if go_flights:
-    # 取第一個匹配的 (或最平的)
-    best_go = go_flights[0]
-    hx_go_details = f"{best_go['num']} (去程): {best_go['time']} HKG → TPE, 價格 {best_go['price']}"
-    hx_go_price = best_go['price']
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto(url, wait_until="networkidle")
 
-# 回程：2026-03-22 TPE→HKG 晚上7:20–9:25 (filter "19:" or "20:" or "21:")
-ret_flights = get_one_way_flights("TPE", "HKG", "2026-03-22", "19:", "21:")
-hx_ret_details = "無匹配 19:20–21:25 HX 航班"
-hx_ret_price = "無數據"
-if ret_flights:
-    best_ret = ret_flights[0]
-    hx_ret_details = f"{best_ret['num']} (回程): {best_ret['time']} TPE → HKG, 價格 {best_ret['price']}"
-    hx_ret_price = best_ret['price']
+    # 提取總價格 (e.g. HK$1,449)
+    total_price = page.query_selector("div[jsname='IWWDBc']")  # 價格元素 selector，可能需調
+    price_text = total_price.inner_text() if total_price else "未抓到價格"
 
-# 計算總價
-hx_total = "無法計算"
-if hx_go_price != "無數據" and hx_ret_price != "無數據":
-    try:
-        go_num = float(hx_go_price.replace("HKD ", "").replace(",", "").strip())
-        ret_num = float(hx_ret_price.replace("HKD ", "").replace(",", "").strip())
-        total = go_num + ret_num
-        hx_total = f"HKD {total:.0f}"
-    except:
-        hx_total = "計算錯誤 (價格格式異常)"
+    # 提取去程細節
+    outbound = page.query_selector_all("div[jsname='oa3M6e']")[0]  # 去程 block
+    outbound_details = outbound.inner_text() if outbound else "無去程資料"
 
-msg = f"<b>今日更新 ({datetime.now().strftime('%Y-%m-%d %H:%M')} HKT)</b>\nHKG ↔ TPE 來回 2026-03-20 出發 / 03-22 返程\n經濟艙 單人來回總價\n\n"
+    # 提取回程細節
+    return_flight = page.query_selector_all("div[jsname='oa3M6e']")[1]  # 回程 block
+    return_details = return_flight.inner_text() if return_flight else "無回程資料"
 
-msg += "<b>香港航空 (超值飛)：</b>\n"
-msg += f"- {hx_go_details}\n"
-msg += f"- {hx_ret_details}\n"
-msg += f"- 單人來回總價: {hx_total}\n\n"
+    browser.close()
 
-msg += "數據來自 Google Flights scrape (fast-flights)，以指定時間範圍搜尋香港航空航班。實際以官網為準。如果無價格，可能 fares 未 release。"
+msg = f"<b>今日更新 ({datetime.now().strftime('%Y-%m-%d %H:%M')} HKT)</b>\nHKG ↔ TPE 來回 2026-03-20/22\n經濟艙 單人來回總價\n\n"
+
+msg += f"總價格: {price_text}\n\n"
+msg += "去程:\n" + outbound_details + "\n\n"
+msg += "回程:\n" + return_details + "\n\n"
+
+msg += "數據直接從 Google Flights 頁面 scrape，實際以官網為準。頁面可能變或需手動驗證。"
 
 send_msg(msg)
